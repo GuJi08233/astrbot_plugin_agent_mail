@@ -804,10 +804,14 @@ class AgentMailPlugin(Star):
     async def _deliver_notifications(self) -> None:
         """Retry each target independently and persist successful delivery receipts."""
         while self._active:
+            wakeup = asyncio.create_task(self._delivery_wakeup.wait())
             try:
-                await asyncio.wait_for(self._delivery_wakeup.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                pass
+                # Python 3.10 wait_for can swallow cancellation when its event
+                # completes concurrently; wait preserves external cancellation.
+                await asyncio.wait({wakeup}, timeout=5)
+            finally:
+                wakeup.cancel()
+                await asyncio.gather(wakeup, return_exceptions=True)
             self._delivery_wakeup.clear()
             await self._sync_watcher()
             for message_id, record in list(self._delivery["pending"].items()):
