@@ -607,3 +607,66 @@ async def test_cancelled_logout_does_not_leave_authorization_permanently_pending
         await task
     assert instance.auth_state["status"] == "failed"
     assert not instance._operation_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_default_initialization_prepares_cli_in_background_without_reading_mail(
+    plugin,
+):
+    _, context, _, module = plugin
+    instance = module.AgentMailPlugin(context, {})
+    assert instance.client.auto_install is True
+    assert instance.client.install_dir == instance.service.data_dir / "runtime"
+    client = FakeClient()
+    started, release = asyncio.Event(), asyncio.Event()
+    client.runtime_state = {"status": "idle", "message": "", "path": "", "version": ""}
+
+    async def ensure_available(*, retry=False):
+        client.runtime_state["status"] = "downloading"
+        started.set()
+        await release.wait()
+        client.runtime_state["status"] = "ready"
+        return "managed-cli"
+
+    client.ensure_available = ensure_available
+    instance.client = instance.service.client = client
+    try:
+        await instance.initialize()
+        await asyncio.wait_for(started.wait(), timeout=2)
+        assert instance._active and not instance._runtime_task.done()
+        assert instance.runtime_state["status"] == "downloading"
+        assert not client.calls
+        assert not client.watch_started.is_set()
+        release.set()
+        await asyncio.wait_for(instance._runtime_task, timeout=2)
+        assert instance.runtime_state["status"] == "ready"
+    finally:
+        await instance.terminate()
+
+
+@pytest.mark.asyncio
+async def test_dependency_retry_is_background_only_and_does_not_log_in_or_read_mail(
+    plugin,
+):
+    instance, _, client, _ = plugin
+    started, release = asyncio.Event(), asyncio.Event()
+    client.runtime_state = {"status": "failed", "message": "Previous network failure"}
+    retries = []
+
+    async def ensure_available(*, retry=False):
+        retries.append(retry)
+        client.runtime_state["status"] = "downloading"
+        started.set()
+        await release.wait()
+        client.runtime_state["status"] = "ready"
+        return "managed-cli"
+
+    client.ensure_available = ensure_available
+    assert (await instance.retry_runtime())["status"] == "downloading"
+    await asyncio.wait_for(started.wait(), timeout=2)
+    assert (await instance.retry_runtime())["status"] == "downloading"
+    assert retries == [True]
+    assert instance.auth_state["status"] == "idle"
+    assert not client.calls
+    release.set()
+    await asyncio.wait_for(instance._runtime_task, timeout=2)

@@ -116,6 +116,13 @@ class Plugin:
         self._delivery = {"pending": {}}
         self._delivery_wakeup = asyncio.Event()
         self.auth_state = {"status": "idle", "url": ""}
+        self.runtime_state = {
+            "status": "ready",
+            "message": "CLI is ready.",
+            "path": "/runtime/agently-cli",
+            "version": "1.0.18",
+        }
+        self.runtime_retries = 0
         self.auth_generation = 0
         self._operation_lock = asyncio.Lock()
         self.permission_error = permission_error
@@ -123,6 +130,16 @@ class Plugin:
 
     async def _sync_watcher(self):
         self.syncs += 1
+
+    async def retry_runtime(self):
+        self.runtime_retries += 1
+        self.runtime_state = {
+            "status": "downloading",
+            "message": "Downloading CLI.",
+            "path": "",
+            "version": "1.0.18",
+        }
+        return self.runtime_state
 
     @asynccontextmanager
     async def mail_operation(self):
@@ -233,6 +250,8 @@ async def web(tmp_path, monkeypatch):
 async def test_all_operations_reject_untrusted_identity_before_cli(web, username, code):
     for operation in (
         "status",
+        "runtime",
+        "runtime_retry",
         "account",
         "send",
         "login_start",
@@ -259,7 +278,39 @@ async def test_status_is_local_and_does_not_probe_mailbox(web):
     assert response.status_code == 200
     assert response.data["actor"] == "user:dashboard:a%20name"
     assert not web.client.calls
-    assert len(web.plugin.context.registered_web_apis) == 15
+    assert response.data["runtime"]["status"] == "ready"
+    assert len(web.plugin.context.registered_web_apis) == 17
+
+
+async def test_runtime_progress_and_retry_are_dashboard_only_and_do_not_read_mail(web):
+    web.plugin.runtime_state = {
+        "status": "failed",
+        "message": "Network unavailable.",
+        "path": "",
+        "version": "1.0.18",
+    }
+    response = await web.call("runtime")
+    assert response.status_code == 200
+    assert response.data["runtime"]["message"] == "Network unavailable."
+    assert (
+        await web.call("runtime_retry", username="api_key:developer")
+    ).status_code == 403
+    assert web.plugin.runtime_retries == 0
+    response = await web.call("runtime_retry", body={"is_admin": True})
+    assert response.status_code == 200
+    assert response.data["runtime"]["status"] == "downloading"
+    assert web.plugin.runtime_retries == 1
+    assert not web.client.calls
+
+
+@pytest.mark.parametrize("auth_status", ["pending", "logged_out"])
+async def test_runtime_repair_remains_available_during_mailbox_authorization(
+    web, auth_status
+):
+    web.plugin.auth_state = {"status": auth_status}
+    assert (await web.call("runtime")).status_code == 200
+    assert (await web.call("runtime_retry")).status_code == 200
+    assert not web.client.calls
 
 
 async def test_account_validates_and_refreshes_authorization_state(web):
@@ -524,9 +575,9 @@ async def test_download_returns_only_verified_plugin_owned_file(web):
 
 async def test_old_instance_cleanup_preserves_replacement_routes(web):
     newer = web.module.MailWebUI(web.plugin)
-    assert len(web.plugin.context.registered_web_apis) == 15
+    assert len(web.plugin.context.registered_web_apis) == 17
     web.ui.close()
-    assert len(web.plugin.context.registered_web_apis) == 15
+    assert len(web.plugin.context.registered_web_apis) == 17
     newer.close()
     assert not web.plugin.context.registered_web_apis
 

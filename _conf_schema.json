@@ -3,7 +3,13 @@
     "description": "Agent Mail CLI 路径",
     "type": "string",
     "default": "",
-    "hint": "留空时从 PATH 查找 agently-cli。也可指定官方原生可执行文件的绝对路径。需在 AstrBot 实际运行环境中安装 CLI。"
+    "hint": "显式指定时严格使用此路径，路径无效时不会自动替换。留空优先查找 PATH 和插件缓存；缺少 CLI 时默认自动准备。"
+  },
+  "auto_install_cli": {
+    "description": "自动准备 Agent Mail CLI",
+    "type": "bool",
+    "default": true,
+    "hint": "缺少 CLI 时从 npm 官方仓库下载当前平台的原生 CLI 1.0.18 到插件数据目录，不需要 Node.js 或 npm，不安装全局程序。关闭后仅使用已有 CLI；就绪后仍需扫码授权。"
   },
   "command_timeout": {
     "description": "邮件命令超时（秒）",

@@ -32,12 +32,18 @@ export function formatSize(value) {
   return `${size} B`;
 }
 
+export function runtimeIsBusy(runtime) {
+  return ["idle", "checking", "downloading"].includes(runtime?.status);
+}
+
 const state = {
   section: "inbox", folder: "inbox", messages: [], selectedId: "", detail: null,
   cursor: "", hasMore: false, query: "", listRequest: 0, detailRequest: 0,
   settings: { access: {}, notification_targets: [], notification_owners: {} },
   login: { status: "idle" }, account: null, composeMode: "send", replyId: "",
-  attachments: [], uploading: false, sending: false, loginTimer: null,
+  attachments: [], uploading: false, sending: false, loginTimer: null, runtimeTimer: null,
+  runtime: { status: "idle", message: "正在检查运行环境。", path: "", version: "" },
+  runtimeRequest: 0,
 };
 let bridge;
 const $ = (id) => document.getElementById(id);
@@ -81,7 +87,10 @@ async function action(button, callback) {
   } catch (error) {
     feedback(error?.message || "操作失败，请稍后重试。", true);
   } finally {
-    button.disabled = button.id === "login-start" && state.login.status === "pending";
+    button.disabled = button.id === "login-start" ? state.login.status === "pending" || state.runtime.status !== "ready"
+      : button.id === "runtime-retry" ? runtimeIsBusy(state.runtime)
+      : button.id === "account-check" ? state.runtime.status !== "ready"
+      : false;
   }
 }
 
@@ -131,6 +140,10 @@ function navigate(section) {
 }
 
 async function loadMessages(append = false) {
+  if (state.runtime.status !== "ready") {
+    renderMailboxUnavailable();
+    return;
+  }
   const request = ++state.listRequest;
   const folder = state.folder;
   const query = state.query;
@@ -358,6 +371,10 @@ async function uploadAttachments() {
 async function sendMessage(event) {
   event.preventDefault();
   if (state.sending || state.uploading || !$("compose-form").reportValidity()) return;
+  if (state.runtime.status !== "ready") {
+    feedback(runtimeIsBusy(state.runtime) ? "官方 CLI 正在准备，请稍候再发送。" : "请先在登录与管理中准备好 CLI 并登录邮箱。", true);
+    return;
+  }
   const mode = state.composeMode;
   const endpoint = mode === "send" ? "send" : mode === "forward" ? "forward" : "reply";
   const payload = { body: $("compose-body").value, attachments: state.attachments.map((item) => item.path) };
@@ -396,6 +413,7 @@ async function sendMessage(event) {
 }
 
 async function loadStatus() {
+  const runtimeRequest = ++state.runtimeRequest;
   const status = await bridge.apiGet("ui/status");
   state.settings = status.settings || state.settings;
   $("actor-key").textContent = status.actor || "";
@@ -404,10 +422,15 @@ async function loadStatus() {
   $("watch-error").hidden = !status.watch_error;
   renderSettings();
   renderLogin(status.login || state.login);
+  if (runtimeRequest === state.runtimeRequest) renderRuntime(status.runtime || state.runtime);
   return status;
 }
 
 async function checkAccount(quiet = false) {
+  if (state.runtime.status !== "ready") {
+    if (!quiet) feedback(runtimeIsBusy(state.runtime) ? "官方 CLI 正在准备，请稍候。" : "请先在运行环境卡片中检查或重试准备 CLI。", !runtimeIsBusy(state.runtime));
+    return false;
+  }
   try {
     const result = await bridge.apiGet("ui/account");
     state.account = result.account || null;
@@ -420,6 +443,72 @@ async function checkAccount(quiet = false) {
     if (!quiet) feedback(`无法读取邮箱：${error.message || "请先完成登录。"}`, true);
     return false;
   }
+}
+
+function renderMailboxUnavailable() {
+  const busy = runtimeIsBusy(state.runtime);
+  const ready = state.runtime.status === "ready";
+  $("mailbox-summary").textContent = busy ? "正在准备官方 CLI…" : ready ? "请先检查邮箱登录" : "CLI 尚未就绪";
+  const empty = emptyState(busy ? "正在准备邮件运行环境" : ready ? "连接你的 Agent Mail" : "运行环境需要处理", busy
+    ? "正在自动下载并校验官方 CLI，完成后会检查邮箱登录状态。"
+    : ready ? "登录共享邮箱后，就能在这里收信、阅读和回复邮件。"
+      : state.runtime.message || "请在登录与管理页面查看原因，或重试准备 CLI。", true, "lock");
+  const manage = actionButton("前往登录与管理", "", "button button-tonal");
+  manage.addEventListener("click", () => navigate("settings"));
+  empty.append(manage);
+  $("message-list").replaceChildren(empty);
+  $("message-list").setAttribute("aria-busy", "false");
+}
+
+async function resumeMailbox() {
+  if (state.runtime.status !== "ready") {
+    renderMailboxUnavailable();
+    return;
+  }
+  if (await checkAccount(true)) {
+    if (state.section === "inbox" || state.section === "sent") await loadMessages();
+  } else renderMailboxUnavailable();
+}
+
+function renderRuntime(runtime) {
+  state.runtime = runtime;
+  const busy = runtimeIsBusy(runtime);
+  const ready = runtime.status === "ready";
+  $("runtime-badge").textContent = { idle: "等待检查", checking: "正在检查", downloading: "正在下载", ready: "已就绪", failed: "准备失败", disabled: "自动安装已关闭" }[runtime.status] || "未知状态";
+  $("runtime-badge").classList.toggle("success", ready);
+  $("runtime-progress").hidden = !busy;
+  $("runtime-message").textContent = runtime.message || (ready ? "官方 CLI 已就绪。" : "正在检查运行环境。");
+  $("runtime-message").classList.toggle("error", runtime.status === "failed");
+  $("runtime-path").textContent = runtime.path || "尚未准备";
+  $("runtime-version").textContent = runtime.version || "外部 CLI，版本由部署环境管理";
+  $("runtime-retry").hidden = ready;
+  $("runtime-retry").disabled = busy;
+  $("runtime-retry").textContent = runtime.status === "disabled" ? "重新检查 CLI" : "重试准备 CLI";
+  $("account-check").disabled = !ready;
+  $("login-start").disabled = state.login.status === "pending" || !ready;
+  $("logout-button").disabled = state.login.status === "pending" || !ready;
+  window.clearTimeout(state.runtimeTimer);
+  state.runtimeTimer = null;
+  if (busy) scheduleRuntimePoll();
+}
+
+function scheduleRuntimePoll() {
+  state.runtimeTimer = window.setTimeout(async () => {
+    try {
+      const request = ++state.runtimeRequest;
+      const result = await bridge.apiGet("ui/runtime");
+      if (request !== state.runtimeRequest) return;
+      const wasBusy = runtimeIsBusy(state.runtime);
+      renderRuntime(result.runtime);
+      if (wasBusy && result.runtime.status === "ready") {
+        await resumeMailbox();
+        await loadStatus();
+        feedback(state.account ? "官方 CLI 已就绪，邮箱可以使用。" : "官方 CLI 已准备完成，请扫码登录邮箱。");
+      } else if (result.runtime.status === "failed") renderMailboxUnavailable();
+    } catch (error) {
+      feedback(`CLI 准备状态更新失败：${error.message || "请点击刷新重试。"}`, true);
+    }
+  }, 2000);
 }
 
 function renderSettings() {
@@ -475,8 +564,8 @@ function renderLogin(login) {
   const pending = login.status === "pending";
   $("login-progress").hidden = !pending;
   $("login-progress-label").textContent = login.url ? "等待微信扫码授权，完成后会自动更新。" : "正在生成授权链接…";
-  $("login-start").disabled = pending;
-  $("logout-button").disabled = pending;
+  $("login-start").disabled = pending || state.runtime.status !== "ready";
+  $("logout-button").disabled = pending || state.runtime.status !== "ready";
   $("login-cancel").hidden = !pending;
   $("login-badge").textContent = { idle: "等待检查", pending: "授权中", authenticated: "已授权", failed: "授权失败", cancelled: "已取消", logged_out: "已退出" }[login.status] || "等待检查";
   $("login-badge").classList.toggle("success", login.status === "authenticated");
@@ -527,8 +616,7 @@ function bindEvents() {
   $("load-more-button").addEventListener("click", () => { void loadMessages(true); });
   $("refresh-button").addEventListener("click", () => action($("refresh-button"), async () => {
     await loadStatus();
-    await checkAccount(true);
-    if (state.section === "inbox" || state.section === "sent") await loadMessages();
+    await resumeMailbox();
   }));
   $("compose-form").addEventListener("submit", sendMessage);
   $("discard-draft").addEventListener("click", () => { if (!state.sending && !state.uploading) resetCompose(); });
@@ -537,6 +625,15 @@ function bindEvents() {
   $("login-start").addEventListener("click", () => action($("login-start"), async () => {
     const result = await bridge.apiPost("ui/login/start", {});
     renderLogin(result.login);
+  }));
+  $("runtime-retry").addEventListener("click", () => action($("runtime-retry"), async () => {
+    const request = ++state.runtimeRequest;
+    const result = await bridge.apiPost("ui/runtime/retry", {});
+    if (request !== state.runtimeRequest) return;
+    renderRuntime(result.runtime);
+    if (result.runtime.status === "ready") await resumeMailbox();
+    else if (result.runtime.status === "failed") feedback(result.runtime.message || "CLI 准备失败。", true);
+    else feedback(runtimeIsBusy(result.runtime) ? "正在检查并准备官方 CLI，请稍候。" : result.runtime.message || "请检查 CLI 配置。");
   }));
   $("login-cancel").addEventListener("click", () => action($("login-cancel"), async () => {
     const result = await bridge.apiPost("ui/login/cancel", {});
@@ -582,7 +679,10 @@ function bindEvents() {
       feedback("通知会话已绑定，将按当前权限投递新邮件。");
     });
   });
-  window.addEventListener("beforeunload", () => window.clearTimeout(state.loginTimer));
+  window.addEventListener("beforeunload", () => {
+    window.clearTimeout(state.loginTimer);
+    window.clearTimeout(state.runtimeTimer);
+  });
 }
 
 async function initialize() {
@@ -601,16 +701,7 @@ async function initialize() {
     if (context?.isDark !== undefined) document.documentElement.dataset.theme = context.isDark ? "dark" : "light";
     if (typeof bridge.onContext === "function") bridge.onContext((context) => { document.documentElement.dataset.theme = context.isDark ? "dark" : "light"; });
     await loadStatus();
-    if (await checkAccount(true)) await loadMessages();
-    else {
-      $("mailbox-summary").textContent = "请先检查邮箱登录";
-      const empty = emptyState("连接你的 Agent Mail", "登录共享邮箱后，就能在这里收信、阅读和回复邮件。", true, "lock");
-      const login = actionButton("前往登录与管理", "", "button button-tonal");
-      login.addEventListener("click", () => navigate("settings"));
-      empty.append(login);
-      $("message-list").replaceChildren(empty);
-      $("message-list").setAttribute("aria-busy", "false");
-    }
+    await resumeMailbox();
   } catch (error) {
     feedback(error.message || "无法连接插件管理接口。", true);
     $("mailbox-summary").textContent = "工作台连接失败";

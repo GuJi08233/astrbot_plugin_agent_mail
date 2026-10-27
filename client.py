@@ -10,6 +10,7 @@ import re
 import shutil
 import signal
 import sys
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -44,13 +45,159 @@ class AgentlyClient:
     Args:
         cli_path: Executable path, or an empty string to search PATH.
         timeout: Maximum duration of a regular command, in seconds.
+        install_dir: Optional plugin-owned storage for the managed native CLI.
+        auto_install: Whether a missing CLI may be downloaded to install_dir.
     """
 
-    def __init__(self, cli_path: str = "", timeout: float = 60) -> None:
+    def __init__(
+        self,
+        cli_path: str = "",
+        timeout: float = 60,
+        *,
+        install_dir: Path | None = None,
+        auto_install: bool = True,
+    ) -> None:
         self.cli_path = cli_path.strip()
         self.timeout = max(float(timeout), 1.0)
         self._processes: set[asyncio.subprocess.Process] = set()
         self._closed = False
+        self.install_dir = Path(install_dir) if install_dir is not None else None
+        self.auto_install = auto_install is True
+        self._managed_executable: Path | None = None
+        self._prepare_lock = asyncio.Lock()
+        self._prepare_token: object | None = None
+        self._install_cancel = threading.Event()
+        self._runtime_state = {
+            "status": "idle",
+            "message": "Checking the official Agent Mail CLI.",
+            "path": "",
+            "version": "",
+            "source": "",
+        }
+
+    @property
+    def runtime_state(self) -> dict[str, str]:
+        """Return public dependency preparation status without mailbox credentials.
+
+        Returns:
+            An independent status, message, executable path, and version snapshot.
+        """
+        return dict(self._runtime_state)
+
+    async def ensure_available(self, *, retry: bool = False) -> str:
+        """Find a configured CLI or prepare one managed, verified local copy.
+
+        Args:
+            retry: Whether to retry a previous automatic preparation failure.
+
+        Returns:
+            The usable executable path; concurrent callers share one installation.
+
+        Raises:
+            AgentlyError: If configuration, platform, or dependency preparation fails.
+        """
+        async with self._prepare_lock:
+            if self._closed:
+                raise AgentlyError("The Agent Mail client is closed.")
+            try:
+                executable = self._executable()
+            except AgentlyError as missing:
+                if self.cli_path or self.install_dir is None:
+                    self._runtime_state.update(status="failed", message=str(missing))
+                    raise
+                from .runtime import (
+                    CLI_VERSION,
+                    RuntimeInstallError,
+                    get_managed_cli_path,
+                    install_cli,
+                )
+
+                try:
+                    cached = get_managed_cli_path(self.install_dir)
+                    if (
+                        cached.is_file()
+                        and not cached.is_symlink()
+                        and cached.stat().st_size > 0
+                        and cached.resolve().is_relative_to(self.install_dir.resolve())
+                    ):
+                        self._managed_executable = cached.resolve()
+                    elif not self.auto_install:
+                        message = "Automatic CLI installation is disabled. Install @tencent-qqmail/agently-cli or configure cli_path."
+                        self._runtime_state.update(status="disabled", message=message)
+                        raise AgentlyError(message)
+                    else:
+                        if self._runtime_state["status"] == "failed" and not retry:
+                            raise AgentlyError(self._runtime_state["message"])
+                        self._runtime_state.update(
+                            status="checking",
+                            message="Preparing the official native Agent Mail CLI.",
+                            version=CLI_VERSION,
+                        )
+                        attempt = self._prepare_token = object()
+                        loop = asyncio.get_running_loop()
+
+                        def progress(phase: str) -> None:
+                            # Registry IO runs in a worker; only mutate UI state on this loop.
+                            messages = {
+                                "metadata": "Checking the official npm package metadata.",
+                                "download": "Downloading the official Agent Mail CLI.",
+                                "verify": "Verifying the CLI package integrity.",
+                                "extract": "Preparing the native CLI executable.",
+                                "ready": "The CLI download has completed.",
+                            }
+
+                            def apply_progress() -> None:
+                                """Apply only progress belonging to an active preparation."""
+                                if (
+                                    not self._closed
+                                    and self._prepare_token is attempt
+                                    and self._runtime_state["status"]
+                                    in {"checking", "downloading"}
+                                ):
+                                    self._runtime_state.update(
+                                        status="downloading",
+                                        message=messages.get(phase, phase),
+                                    )
+
+                            if not loop.is_closed():
+                                loop.call_soon_threadsafe(apply_progress)
+
+                        self._managed_executable = await install_cli(
+                            self.install_dir,
+                            cancel_event=self._install_cancel,
+                            progress=progress,
+                        )
+                    executable = self._executable()
+                    self._runtime_state.update(version=CLI_VERSION)
+                except RuntimeInstallError as exc:
+                    message = f"Automatic Agent Mail CLI preparation failed: {exc} Retry in the mailbox management page, or configure cli_path."
+                    self._runtime_state.update(status="failed", message=message)
+                    raise AgentlyError(message) from exc
+                except asyncio.CancelledError:
+                    if not self._closed:
+                        self._runtime_state.update(
+                            status="idle", message="CLI preparation was cancelled."
+                        )
+                        self._install_cancel = threading.Event()
+                    raise
+            if self._closed:
+                raise AgentlyError("The Agent Mail client is closed.")
+            source = (
+                "configured"
+                if self.cli_path
+                else "managed"
+                if self._managed_executable
+                else "path"
+            )
+            self._runtime_state.update(
+                status="ready",
+                message="Agent Mail CLI is ready.",
+                path=executable,
+                source=source,
+            )
+            if source != "managed":
+                self._runtime_state["version"] = ""
+            return executable
 
     def _executable(self) -> str:
         """Resolve npm shims to native binaries, especially on Windows.
@@ -61,6 +208,10 @@ class AgentlyClient:
         Raises:
             AgentlyError: If the CLI is absent or only an unsafe shim is found.
         """
+        if not self.cli_path and self._managed_executable is not None:
+            if self._managed_executable.is_file():
+                return str(self._managed_executable)
+            self._managed_executable = None
         executable = shutil.which(self.cli_path or "agently-cli")
         if executable is None and self.cli_path:
             candidate = Path(self.cli_path).expanduser()
@@ -128,8 +279,9 @@ class AgentlyClient:
         if self._closed:
             raise AgentlyError("The Agent Mail client is closed.")
         try:
+            executable = await self.ensure_available()
             process = await asyncio.create_subprocess_exec(
-                self._executable(),
+                executable,
                 *args,
                 cwd=cwd,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -394,6 +546,9 @@ class AgentlyClient:
     async def close(self) -> None:
         """Prevent new commands and terminate every process owned by this client."""
         self._closed = True
+        self._install_cancel.set()
+        async with self._prepare_lock:
+            pass
         await asyncio.gather(
             *(self._stop(process) for process in tuple(self._processes)),
             return_exceptions=True,

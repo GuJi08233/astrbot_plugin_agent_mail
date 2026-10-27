@@ -114,16 +114,23 @@ class AgentMailPlugin(Star):
         super().__init__(context, config)
         self.config = config
         timeout = max(10, min(int(config.get("command_timeout", 60)), 300))
-        self.client = AgentlyClient(str(config.get("cli_path", "")), timeout)
+        data_dir = Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
+        self.client = AgentlyClient(
+            str(config.get("cli_path", "")),
+            timeout,
+            install_dir=data_dir / "runtime",
+            auto_install=config.get("auto_install_cli", True),
+        )
         self.service = MailService(
             self.client,
-            Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME,
+            data_dir,
             self._save_settings,
         )
         self._active = False
         self._watch_task: asyncio.Task | None = None
         self._delivery_task: asyncio.Task | None = None
         self._login_task: asyncio.Task | None = None
+        self._runtime_task: asyncio.Task | None = None
         self._auth_state = {"status": "idle", "url": "", "error": "", "account": None}
         self._auth_lock = asyncio.Lock()
         self._operation_lock = asyncio.Lock()
@@ -183,6 +190,8 @@ class AgentMailPlugin(Star):
                 raise ValueError("Stored notification receipts are invalid.")
         self._delivery = delivery
         self._active = True
+        if callable(getattr(self.client, "ensure_available", None)):
+            self._runtime_task = asyncio.create_task(self._prepare_runtime())
         self._delivery_task = asyncio.create_task(self._deliver_notifications())
         self._delivery_wakeup.set()
         await self._sync_watcher()
@@ -194,7 +203,12 @@ class AgentMailPlugin(Star):
             self.webui.close()
         tasks = [
             task
-            for task in (self._watch_task, self._delivery_task, self._login_task)
+            for task in (
+                self._watch_task,
+                self._delivery_task,
+                self._login_task,
+                self._runtime_task,
+            )
             if task
         ]
         for task in tasks:
@@ -202,6 +216,60 @@ class AgentMailPlugin(Star):
         await asyncio.gather(*tasks, return_exceptions=True)
         await self.client.close()
         self._watch_task = self._delivery_task = self._login_task = None
+        self._runtime_task = None
+
+    @property
+    def runtime_state(self) -> dict:
+        """Return the public managed CLI preparation status.
+
+        Returns:
+            An independent dependency status snapshot, without account credentials.
+        """
+        return dict(
+            getattr(
+                self.client,
+                "runtime_state",
+                {
+                    "status": "idle",
+                    "message": "CLI preparation status is unavailable.",
+                    "path": "",
+                    "version": "",
+                },
+            )
+        )
+
+    async def _prepare_runtime(self, *, retry: bool = False) -> None:
+        """Prepare dependencies without delaying AstrBot's startup or logging in.
+
+        Args:
+            retry: Whether the administrator explicitly requested another attempt.
+        """
+        try:
+            await self.client.ensure_available(retry=retry)
+        except AgentlyError:
+            self.logger.warning(
+                "Agent Mail CLI preparation failed; see the runtime status in the mailbox management page."
+            )
+        else:
+            if self._active:
+                await self._sync_watcher()
+                self._delivery_wakeup.set()
+
+    async def retry_runtime(self) -> dict:
+        """Start an administrator-requested retry and return without waiting on IO.
+
+        Returns:
+            The current preparation status for the management page to poll.
+
+        Raises:
+            MailPermissionError: If this plugin has been disabled.
+        """
+        if not self._active:
+            raise MailPermissionError("The Agent Mail plugin is inactive.")
+        if self._runtime_task is None or self._runtime_task.done():
+            self._runtime_task = asyncio.create_task(self._prepare_runtime(retry=True))
+            await asyncio.sleep(0)
+        return self.runtime_state
 
     def _actor(self, event: AstrMessageEvent) -> MailActor:
         """Build an identity exclusively from trusted framework event fields.

@@ -38,6 +38,8 @@ class MailWebUI:
         self._handlers: set = set()
         for endpoint, method, operation in (
             ("status", "GET", "status"),
+            ("runtime", "GET", "runtime"),
+            ("runtime/retry", "POST", "runtime_retry"),
             ("account", "GET", "account"),
             ("messages", "GET", "messages"),
             ("messages/<message_id>", "GET", "message"),
@@ -162,10 +164,15 @@ class MailWebUI:
                     "watch_error": self.plugin._watch_error,
                     "pending_notifications": len(self.plugin._delivery["pending"]),
                     "login": self.plugin.auth_state,
+                    "runtime": self.plugin.runtime_state,
                     "settings": self.plugin.service.state,
                     "actor": actor.key,
                     "attachments_directory": str(self.plugin.service.attachment_dir),
                 }
+            elif operation == "runtime":
+                value = {"runtime": self.plugin.runtime_state}
+            elif operation == "runtime_retry":
+                value = {"runtime": await self.plugin.retry_runtime()}
             elif operation == "account":
                 generation = self.plugin.auth_generation
                 account = self._cli_data(await self.plugin.service.account(actor))

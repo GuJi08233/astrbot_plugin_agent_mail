@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseRecipients, senderText, messageBody, formatDate, formatSize } from "../views/mail/app.js";
+import { parseRecipients, senderText, messageBody, formatDate, formatSize, runtimeIsBusy } from "../views/mail/app.js";
 
 test("recipient entry accepts common separators without silently duplicating recipients", () => {
   assert.deepEqual(parseRecipients("alice@example.com；bob@example.com, alice@example.com\ncarol@example.com"), ["alice@example.com", "bob@example.com", "carol@example.com"]);
@@ -27,4 +27,10 @@ test("unusual server dates and attachment sizes do not break mail rendering", ()
   assert.equal(formatSize("1048576"), "1.0 MiB");
   assert.equal(formatSize(-1), "");
   assert.equal(formatSize("invalid"), "");
+});
+
+test("only pending runtime preparation blocks automatic mailbox checks", () => {
+  for (const status of ["idle", "checking", "downloading"]) assert.equal(runtimeIsBusy({ status }), true);
+  for (const status of ["ready", "failed", "disabled"]) assert.equal(runtimeIsBusy({ status }), false);
+  assert.equal(runtimeIsBusy(null), false);
 });
