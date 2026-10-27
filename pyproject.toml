@@ -1,0 +1,30 @@
+[project]
+name = "astrbot-plugin-agent-mail"
+version = "0.1.0"
+description = "Permission-controlled Tencent Agent Mail tools for AstrBot LLMs"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+readme = "README.md"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4,<10",
+  "pytest-asyncio>=1.1,<2",
+  "ruff==0.15.22",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["F", "W", "E", "ASYNC", "C4", "Q", "I", "UP"]
+ignore = ["E501"]

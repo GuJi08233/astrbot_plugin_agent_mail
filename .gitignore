@@ -1,0 +1,26 @@
+# Python and development tools
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Local tools, credentials, runtime data, and exports
+.tools/
+.env
+.env.*
+!.env.example
+data/
+plugin_data/
+attachments/
+downloads/
+*.log
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

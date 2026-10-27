@@ -1,0 +1,20 @@
+{
+  "cli_path": {
+    "description": "Agent Mail CLI 路径",
+    "type": "string",
+    "default": "",
+    "hint": "留空时从 PATH 查找 agently-cli。也可指定官方原生可执行文件的绝对路径。需在 AstrBot 实际运行环境中安装 CLI。"
+  },
+  "command_timeout": {
+    "description": "邮件命令超时（秒）",
+    "type": "int",
+    "default": 60,
+    "hint": "普通查信、发信和附件操作的超时，范围 10–300 秒。持续监听与扫码授权单独管理。"
+  },
+  "notification_excerpt_chars": {
+    "description": "通知正文预览长度",
+    "type": "int",
+    "default": 200,
+    "hint": "新邮件通知中正文预览的最大字符数，范围 0–1000。设为 0 时只显示邮件基本信息。收信通知默认关闭，需要另行绑定会话。"
+  }
+}
