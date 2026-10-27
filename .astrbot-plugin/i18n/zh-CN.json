@@ -1,0 +1,8 @@
+{
+  "views": {
+    "mail": {
+      "title": "邮箱工作台",
+      "description": "管理 Agent Mail 登录、收件箱、发信、访问权限和通知会话。"
+    }
+  }
+}

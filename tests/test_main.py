@@ -457,3 +457,153 @@ async def test_full_notification_queue_waits_for_space_without_dropping_events(
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_web_login_progress_cancel_and_repeated_start_share_one_process(plugin):
+    instance, context, client, _ = plugin
+    started = asyncio.Event()
+    calls = 0
+
+    async def login(on_url):
+        nonlocal calls
+        calls += 1
+        await on_url("https://agent.qq.com/auth?state=a%2Bb&code=x=y")
+        started.set()
+        await asyncio.Event().wait()
+
+    client.login = login
+    assert (await instance.start_login())["status"] == "pending"
+    await asyncio.wait_for(started.wait(), timeout=2)
+    task = instance._login_task
+    assert (await instance.start_login())["url"].endswith("state=a%2Bb&code=x=y")
+    assert instance._login_task is task and calls == 1
+    assert not context.sent
+    assert (await instance.cancel_login())["status"] == "cancelled"
+    assert task.done() and instance.auth_state["url"] == ""
+
+
+@pytest.mark.asyncio
+async def test_successful_web_login_verifies_account_and_clears_authorization_url(
+    plugin,
+):
+    instance, context, client, _ = plugin
+
+    async def login(on_url):
+        await on_url("https://agent.qq.com/auth?code=example")
+        return {"ok": True, "data": {"email": "shared@agent.qq.com"}}
+
+    client.login = login
+    await instance.start_login()
+    await asyncio.wait_for(instance._login_task, timeout=2)
+    state = instance.auth_state
+    assert state["status"] == "authenticated" and state["url"] == ""
+    assert state["account"]["email"] == "shared@agent.qq.com"
+    state["account"]["email"] = "not-the-mailbox@example.com"
+    assert instance.auth_state["account"]["email"] == "shared@agent.qq.com"
+    assert not context.sent
+
+
+@pytest.mark.asyncio
+async def test_logout_stops_notifications_and_blocks_mail_until_authorization(plugin):
+    instance, _, client, _ = plugin
+    admin = Event("admin", True)
+    await instance.service.set_notification(
+        instance._actor(admin), admin.unified_msg_origin, True
+    )
+    await instance._sync_watcher()
+    await asyncio.wait_for(client.watch_started.wait(), timeout=2)
+    assert (await instance.logout())["status"] == "logged_out"
+    assert client.watch_stopped.is_set()
+    assert instance._authorized_targets() == []
+    before = len(client.calls)
+    assert json.loads(await instance.mail_list(admin))["ok"] is False
+    assert len(client.calls) == before
+    assert client.calls[-1][0] == ["auth", "logout"]
+
+
+@pytest.mark.asyncio
+async def test_stale_account_refresh_cannot_undo_cancel_or_logout(plugin):
+    instance, _, _, _ = plugin
+    generation = instance.auth_generation
+    await instance.cancel_login()
+    await instance.mark_authenticated(
+        {"email": "stale@agent.qq.com"}, generation=generation
+    )
+    assert instance.auth_state["status"] == "cancelled"
+    generation = instance.auth_generation
+    await instance.logout()
+    await instance.mark_authenticated(
+        {"email": "stale@agent.qq.com"}, generation=generation
+    )
+    assert instance.auth_state["status"] == "logged_out"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_notification_owner_respects_current_username_and_deny(plugin):
+    instance, context, _, module = plugin
+    username = "console"
+    context.get_config = lambda target=None: {
+        "admins_id": [],
+        "dashboard": {"username": username},
+    }
+    owner = module.MailActor("user:dashboard:console", True, "", "dashboard", "")
+    target = "bot:FriendMessage:owner"
+    await instance.service.set_notification(owner, target, True)
+    assert instance._authorized_targets() == [target]
+    await instance.service.set_access(owner, "notify", owner.key, "deny")
+    assert instance._authorized_targets() == []
+    await instance.service.set_access(owner, "notify", owner.key, "revoke")
+    username = "replacement"
+    assert instance._authorized_targets() == []
+
+
+@pytest.mark.asyncio
+async def test_logout_waits_for_inflight_llm_send_to_finish_on_original_account(plugin):
+    instance, _, client, _ = plugin
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def run(args, *, cwd=None):
+        client.calls.append((args, cwd))
+        if "+send" in args:
+            started.set()
+            await release.wait()
+        return {"ok": True, "data": {"message_id": "msg_sent"}}
+
+    client.run = run
+    sending = asyncio.create_task(
+        instance.mail_send(
+            Event("admin", True), ["recipient@example.com"], "Subject", "Body"
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+    logout = asyncio.create_task(instance.logout())
+    await asyncio.sleep(0)
+    assert not logout.done()
+    assert len(client.calls) == 1
+    assert instance.auth_state["status"] == "idle"
+    release.set()
+    assert json.loads(await asyncio.wait_for(sending, timeout=2))["ok"] is True
+    assert (await asyncio.wait_for(logout, timeout=2))["status"] == "logged_out"
+    assert client.calls[-1][0] == ["auth", "logout"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_logout_does_not_leave_authorization_permanently_pending(
+    plugin,
+):
+    instance, _, client, _ = plugin
+    started = asyncio.Event()
+
+    async def run(args, *, cwd=None):
+        started.set()
+        await asyncio.Event().wait()
+
+    client.run = run
+    task = asyncio.create_task(instance.logout())
+    await asyncio.wait_for(started.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert instance.auth_state["status"] == "failed"
+    assert not instance._operation_lock.locked()

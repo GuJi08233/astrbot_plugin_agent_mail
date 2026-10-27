@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Agent Mail · 邮箱工作台</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <svg class="icon-library" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+      <symbol id="icon-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m4 7 8 6 8-6"/></symbol>
+      <symbol id="icon-inbox" viewBox="0 0 24 24"><path d="M4 5h16l2 10v4H2v-4L4 5Z"/><path d="M2 15h6l2 3h4l2-3h6"/></symbol>
+      <symbol id="icon-send" viewBox="0 0 24 24"><path d="m21 3-7 18-4-7-7-4L21 3Z"/><path d="m10 14 7-7"/></symbol>
+      <symbol id="icon-pen" viewBox="0 0 24 24"><path d="m16 3 5 5-12 12-6 1 1-6L16 3Z"/><path d="m13 6 5 5"/></symbol>
+      <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></symbol>
+      <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+      <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7a9 9 0 1 0 1 8M20 3v5h-5"/></symbol>
+      <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="m9 5-7 7 7 7M2 12h20"/></symbol>
+      <symbol id="icon-reply" viewBox="0 0 24 24"><path d="m9 4-6 6 6 6M3 10h10c5 0 8 3 8 9"/></symbol>
+      <symbol id="icon-forward" viewBox="0 0 24 24"><path d="m15 4 6 6-6 6M21 10H11c-5 0-8 3-8 9"/></symbol>
+      <symbol id="icon-attach" viewBox="0 0 24 24"><path d="m8 13 7-7a3 3 0 0 1 4 4L9 20a5 5 0 0 1-7-7L13 2"/></symbol>
+      <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+      <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4"/></symbol>
+      <symbol id="icon-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="12" rx="3"/><path d="M8 10V6a4 4 0 0 1 8 0v4m-4 5v3"/></symbol>
+      <symbol id="icon-bell" viewBox="0 0 24 24"><path d="M4 17h16l-2-4V8a6 6 0 0 0-12 0v5l-2 4Zm6 4h4"/></symbol>
+    </svg>
+
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand"><span class="brand-mark"><svg class="icon"><use href="#icon-mail"/></svg></span><div><strong>Agent Mail</strong><span>ASTRBOT 邮件工作台</span></div></div>
+        <button class="button button-primary compose-shortcut" data-section="compose"><svg class="icon"><use href="#icon-pen"/></svg>写邮件</button>
+        <nav id="mail-nav" aria-label="邮箱导航">
+          <p class="nav-label">邮件</p>
+          <button class="nav-item active" data-section="inbox" aria-current="page"><svg class="icon"><use href="#icon-inbox"/></svg>收件箱<span id="inbox-count" class="nav-count" hidden></span></button>
+          <button class="nav-item" data-section="sent"><svg class="icon"><use href="#icon-send"/></svg>已发送</button>
+          <p class="nav-label nav-label-settings">管理</p>
+          <button class="nav-item" data-section="settings"><svg class="icon"><use href="#icon-settings"/></svg>登录与管理</button>
+        </nav>
+        <div class="sidebar-bottom"><span class="connection-dot" id="sidebar-connection"></span><div><strong id="sidebar-status">正在连接工作台</strong><span>实例共享邮箱 · 权限受控</span></div></div>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar"><div><p class="eyebrow">AGENT MAIL / WORKSPACE</p><h1 id="page-title">收件箱</h1></div><div class="topbar-actions"><span class="account-pill" title="当前绑定的 Agent Mail 邮箱"><svg class="icon"><use href="#icon-mail"/></svg><span id="account-address">正在读取邮箱状态</span></span><button id="refresh-button" class="button button-icon button-text" title="刷新当前页面" aria-label="刷新当前页面"><svg class="icon"><use href="#icon-refresh"/></svg></button></div></header>
+        <div id="feedback" class="feedback" role="status" aria-live="polite" hidden><span id="feedback-text"></span><button id="feedback-dismiss" class="button button-icon button-text" aria-label="关闭提示"><svg class="icon"><use href="#icon-close"/></svg></button></div>
+        <div id="connection-error" class="connection-error" hidden><svg class="icon"><use href="#icon-lock"/></svg><h2>请从 AstrBot 打开此工作台</h2><p>在插件详情中选择 Agent Mail 可视化视图，即可使用已登录的管理会话。</p></div>
+
+        <section id="mailbox-section" class="section mailbox-section" aria-label="邮件列表和详情">
+          <div class="mailbox-toolbar"><form id="search-form" class="search-box"><svg class="icon"><use href="#icon-search"/></svg><input id="search-query" type="search" placeholder="搜索邮件主题或正文…" aria-label="搜索邮件" autocomplete="off"/><button class="button button-tonal" type="submit">搜索</button></form><span id="mailbox-summary" class="muted">正在加载邮件</span></div>
+          <div class="mailbox-grid" id="mailbox-grid">
+            <div class="message-list-panel"><div class="list-heading"><span id="folder-label">收件箱</span><span id="page-count" class="muted"></span></div><div id="message-list" class="message-list" aria-label="邮件列表" aria-busy="true"></div><button id="load-more-button" class="button button-text load-more" hidden>加载更多邮件</button></div>
+            <article id="message-detail" class="message-detail"><div class="empty-state"><span class="empty-icon"><svg class="icon"><use href="#icon-mail"/></svg></span><h2>选择一封邮件</h2><p>在左侧查看收件、阅读正文与处理附件。</p></div></article>
+          </div>
+        </section>
+
+        <section id="compose-section" class="section" hidden>
+          <div class="section-intro"><span class="eyebrow">COMPOSE</span><h2 id="compose-heading">写一封新邮件</h2><p id="compose-description">通过当前绑定的 Agent Mail 邮箱发送。草稿仅保留在当前页面。</p></div>
+          <form id="compose-form" class="card composer"><div class="compose-field" id="compose-to-row"><label for="compose-to">收件人</label><input id="compose-to" type="text" required placeholder="alice@example.com，多个收件人用逗号分隔" autocomplete="off"/></div><div class="compose-field" id="compose-subject-row"><label for="compose-subject">主题</label><input id="compose-subject" type="text" required maxlength="998" placeholder="添加邮件主题"/></div><label class="sr-only" for="compose-body">邮件正文</label><textarea id="compose-body" class="compose-body" required maxlength="50000" placeholder="在这里写下邮件正文…"></textarea><div id="compose-attachments" class="attachment-chips"></div><div class="compose-footer"><div class="attachment-picker"><input id="compose-files" type="file" multiple hidden/><button id="attach-button" class="button button-text" type="button"><svg class="icon"><use href="#icon-attach"/></svg>添加附件</button><span id="attachment-status" class="muted">每个附件最大 20 MiB</span></div><div class="compose-actions"><button id="discard-draft" class="button button-text" type="button">清空</button><button id="send-button" class="button button-primary" type="submit"><svg class="icon"><use href="#icon-send"/></svg><span id="send-label">发送邮件</span></button></div></div></form>
+          <p id="compose-context" class="context-note" hidden></p>
+        </section>
+
+        <section id="settings-section" class="section" hidden>
+          <div class="section-intro"><span class="eyebrow">ADMINISTRATION</span><h2>登录与管理</h2><p>绑定共享邮箱，为用户和插件分配权限，并选择新邮件通知会话。</p></div>
+          <div class="settings-grid">
+            <section class="card account-card"><div class="card-heading"><span class="card-icon"><svg class="icon"><use href="#icon-lock"/></svg></span><div><h3>邮箱登录</h3><p>授权信息由官方 CLI 管理，工作台不展示凭据。</p></div><span id="login-badge" class="badge">未检查</span></div><div class="account-overview"><div><span class="field-caption">当前邮箱</span><strong id="settings-account">尚未读取邮箱信息</strong></div><div><span class="field-caption">新邮件监听</span><strong id="watch-status">未启用</strong></div></div><div id="login-progress" class="login-progress" hidden><span class="progress-dot"></span><span id="login-progress-label">正在生成授权链接…</span></div><div id="login-link-box" class="login-link-box" hidden><p>请打开以下原始链接，按页面提示完成微信扫码授权。</p><textarea id="login-url" rows="2" readonly aria-label="原始授权链接"></textarea><div><a id="login-link" class="button button-tonal" target="_blank" rel="noopener noreferrer">打开授权页面</a><button id="select-login-link" class="button button-text" type="button">选中链接</button></div><span class="muted">如果当前嵌入页面无法打开新窗口，请复制链接到浏览器中打开。</span></div><p id="login-error" class="inline-error" hidden></p><div class="card-actions"><button id="login-start" class="button button-primary">扫码登录 / 重新绑定</button><button id="login-cancel" class="button button-text" hidden>取消本次授权</button><button id="account-check" class="button button-tonal">检查登录状态</button><button id="logout-button" class="button button-text danger-text">退出邮箱登录</button></div></section>
+
+            <section class="card permissions-card"><div class="card-heading"><span class="card-icon"><svg class="icon"><use href="#icon-settings"/></svg></span><div><h3>访问权限</h3><p>管理员默认允许；普通用户、其他插件默认拒绝。</p></div></div><form id="permission-form" class="management-form"><label>权限<select id="permission-capability"><option value="read">读信 read</option><option value="send">发信 send</option><option value="notify">通知 notify</option></select></label><label class="field-grow">用户或插件身份<input id="permission-principal" required placeholder="user:平台实例ID:用户ID 或 plugin:插件注册名" autocomplete="off"/></label><label>操作<select id="permission-mode"><option value="allow">白名单允许</option><option value="deny">黑名单拒绝</option><option value="revoke">恢复默认</option></select></label><button class="button button-tonal" type="submit">保存规则</button></form><p class="context-note">黑名单优先。回复、转发及带附件发信需要 read + send；通知需要 read + notify。</p><div id="permissions-list" class="permissions-list"></div><details class="identity-details"><summary>当前管理身份</summary><code id="actor-key"></code></details></section>
+
+            <section class="card notifications-card"><div class="card-heading"><span class="card-icon"><svg class="icon"><use href="#icon-bell"/></svg></span><div><h3>通知会话</h3><p>默认关闭。仅向这里绑定的会话推送新邮件。</p></div><span id="notification-count" class="badge">0 个会话</span></div><form id="notification-form" class="management-form"><label class="field-grow">目标会话 UMO<input id="notification-target" required placeholder="平台实例ID:FriendMessage:用户ID" autocomplete="off"/></label><button class="button button-tonal" type="submit">添加会话</button></form><div id="notification-list" class="notification-list"></div><p id="watch-error" class="inline-error" hidden></p><p class="context-note">目标平台需支持主动发消息。权限撤销后不再投递，通知不会自动回复邮件。</p></section>
+          </div>
+        </section>
+        <footer class="workspace-footer"><span>腾讯 Agent Mail · 社区插件</span><span>邮件内容以纯文本安全展示</span></footer>
+      </main>
+    </div>
+
+    <dialog id="logout-dialog" class="confirm-dialog"><h2 class="text-h3 pa-4 pb-0 pl-6">退出共享邮箱登录？</h2><p>这会退出整个 AstrBot 实例使用的邮箱。需要重新授权后才能继续收发邮件。</p><form method="dialog" class="dialog-actions"><button class="button button-text" value="cancel">取消</button><button id="confirm-logout" class="button button-tonal danger-text" value="logout">退出登录</button></form></dialog>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

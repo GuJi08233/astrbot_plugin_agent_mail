@@ -8,8 +8,10 @@ import html
 import json
 import re
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -54,11 +56,14 @@ class PluginMailAPI:
         Raises:
             MailPermissionError: If either plugin is inactive or access is denied.
         """
-        metadata = self._plugin.context.get_registered_star(self._name)
-        if not self._plugin._active or not metadata or not metadata.activated:
-            raise MailPermissionError("The mail plugin or caller plugin is inactive.")
-        actor = MailActor(f"plugin:{self._name}")
-        return await getattr(self._plugin.service, operation)(actor, *args, **kwargs)
+        async with self._plugin.mail_operation():
+            metadata = self._plugin.context.get_registered_star(self._name)
+            if not metadata or not metadata.activated:
+                raise MailPermissionError("The caller plugin is inactive.")
+            actor = MailActor(f"plugin:{self._name}")
+            return await getattr(self._plugin.service, operation)(
+                actor, *args, **kwargs
+            )
 
     async def account(self) -> dict:
         """Return the shared mailbox's public account information."""
@@ -119,6 +124,10 @@ class AgentMailPlugin(Star):
         self._watch_task: asyncio.Task | None = None
         self._delivery_task: asyncio.Task | None = None
         self._login_task: asyncio.Task | None = None
+        self._auth_state = {"status": "idle", "url": "", "error": "", "account": None}
+        self._auth_lock = asyncio.Lock()
+        self._operation_lock = asyncio.Lock()
+        self._auth_generation = 0
         self._watch_error = ""
         self._watch_auth_expired = False
         self._watch_lock = asyncio.Lock()
@@ -128,6 +137,11 @@ class AgentMailPlugin(Star):
         self._queue_space = asyncio.Event()
         self._queue_space.set()
         self._retry_at: dict[str, float] = {}
+        self.webui = None
+        if callable(getattr(context, "register_web_api", None)):
+            from .webui import MailWebUI
+
+            self.webui = MailWebUI(self)
 
     async def _save_settings(self, state: dict) -> None:
         """Persist service settings through AstrBot's plugin-specific KV store.
@@ -176,6 +190,8 @@ class AgentMailPlugin(Star):
     async def terminate(self) -> None:
         """Cancel and await all background tasks and their CLI processes."""
         self._active = False
+        if self.webui is not None:
+            self.webui.close()
         tasks = [
             task
             for task in (self._watch_task, self._delivery_task, self._login_task)
@@ -236,11 +252,10 @@ class AgentMailPlugin(Star):
             JSON containing either the CLI envelope or an explicit failure.
         """
         try:
-            if not self._active:
-                raise MailPermissionError("The Agent Mail plugin is inactive.")
-            result = await getattr(self.service, operation)(
-                self._actor(event), **kwargs
-            )
+            async with self.mail_operation():
+                result = await getattr(self.service, operation)(
+                    self._actor(event), **kwargs
+                )
             return json.dumps(
                 {"ok": True, "result": result, "data_notice": MAIL_DATA_NOTICE},
                 ensure_ascii=False,
@@ -615,21 +630,183 @@ class AgentMailPlugin(Star):
         if not self._active or not event.is_admin() or not event.is_private_chat():
             yield event.plain_result("请由管理员在私聊中发起授权。")
             return
-        if self._login_task and not self._login_task.done():
-            yield event.plain_result("已有授权流程正在进行，请先完成或等待超时。")
-            return
-        self._login_task = asyncio.create_task(self._login(event.unified_msg_origin))
+        await self.start_login(event.unified_msg_origin)
         yield event.plain_result("正在发起 Agent Mail 授权，授权链接将发送到当前私聊。")
 
-    async def _login(self, session: str) -> None:
+    @property
+    def auth_state(self) -> dict:
+        """Return public OAuth progress without exposing credentials.
+
+        Returns:
+            A copy of the status, original authorization URL, and account summary.
+        """
+        return copy.deepcopy(self._auth_state)
+
+    @property
+    def auth_generation(self) -> int:
+        """Return the generation used to reject stale account refresh responses."""
+        return self._auth_generation
+
+    @asynccontextmanager
+    async def mail_operation(self):
+        """Keep a mail operation on one account while credential changes wait.
+
+        Yields:
+            Control while the plugin is active and mailbox credentials are stable.
+
+        Raises:
+            MailPermissionError: If the plugin or shared mailbox is unavailable.
+        """
+        async with self._operation_lock:
+            if not self._active:
+                raise MailPermissionError("The Agent Mail plugin is inactive.")
+            if self._auth_state["status"] in {"pending", "logged_out"}:
+                raise MailPermissionError(
+                    "Mailbox authorization is changing or logged out."
+                )
+            yield
+
+    async def start_login(self, session: str | None = None) -> dict:
+        """Start one explicitly requested shared-mailbox authorization flow.
+
+        Args:
+            session: Optional private conversation receiving the same login URL.
+
+        Returns:
+            The current authorization state; repeated starts share the active flow.
+
+        Raises:
+            MailPermissionError: If the plugin is inactive.
+        """
+        async with self._auth_lock, self._operation_lock:
+            if not self._active:
+                raise MailPermissionError("The Agent Mail plugin is inactive.")
+            if self._login_task and not self._login_task.done():
+                return self.auth_state
+            self._auth_generation += 1
+            self._auth_state = {
+                "status": "pending",
+                "url": "",
+                "error": "",
+                "account": None,
+            }
+            await self._sync_watcher()
+            self._login_task = asyncio.create_task(self._login(session))
+            return self.auth_state
+
+    async def cancel_login(self) -> dict:
+        """Cancel an active OAuth flow without removing existing CLI credentials.
+
+        Returns:
+            The public cancelled authorization state.
+        """
+        async with self._auth_lock:
+            if not self._active:
+                raise MailPermissionError("The Agent Mail plugin is inactive.")
+            self._auth_generation += 1
+            if self._login_task and not self._login_task.done():
+                self._login_task.cancel()
+                await asyncio.gather(self._login_task, return_exceptions=True)
+            self._login_task = None
+            self._auth_state = {
+                "status": "cancelled",
+                "url": "",
+                "error": "",
+                "account": None,
+            }
+            await self._sync_watcher()
+            self._delivery_wakeup.set()
+            return self.auth_state
+
+    async def mark_authenticated(
+        self, account: dict, *, generation: int | None = None
+    ) -> None:
+        """Accept a verified account response unless authorization changed meanwhile.
+
+        Args:
+            account: Public account data returned by the official +me command.
+            generation: Account request generation, if the request ran concurrently.
+        """
+        if not self._active or (
+            generation is not None and generation != self._auth_generation
+        ):
+            return
+        self._auth_state = {
+            "status": "authenticated",
+            "url": "",
+            "error": "",
+            "account": copy.deepcopy(account),
+        }
+        self._watch_auth_expired = False
+        await self._sync_watcher()
+        self._delivery_wakeup.set()
+
+    async def logout(self) -> dict:
+        """Remove local CLI authorization after an explicit administrator request.
+
+        Returns:
+            The logged-out state. This does not delete the remote mailbox or emails.
+
+        Raises:
+            AgentlyError: If the CLI could not remove its local authorization.
+        """
+        async with self._auth_lock, self._operation_lock:
+            if not self._active:
+                raise MailPermissionError("The Agent Mail plugin is inactive.")
+            self._auth_generation += 1
+            if self._login_task and not self._login_task.done():
+                self._login_task.cancel()
+                await asyncio.gather(self._login_task, return_exceptions=True)
+            self._login_task = None
+            previous = self.auth_state
+            self._auth_state = {
+                "status": "pending",
+                "url": "",
+                "error": "",
+                "account": None,
+            }
+            await self._sync_watcher()
+            try:
+                await self.client.run(["auth", "logout"])
+            except asyncio.CancelledError:
+                self._auth_state = {
+                    "status": "failed",
+                    "url": "",
+                    "error": "Logout was interrupted; refresh the account status.",
+                    "account": None,
+                }
+                await self._sync_watcher()
+                raise
+            except Exception:
+                self._auth_state = previous
+                if self._auth_state["status"] == "pending":
+                    self._auth_state = {
+                        "status": "failed",
+                        "url": "",
+                        "error": "Logout did not complete.",
+                        "account": None,
+                    }
+                await self._sync_watcher()
+                raise
+            self._watch_auth_expired = True
+            self._auth_state = {
+                "status": "logged_out",
+                "url": "",
+                "error": "",
+                "account": None,
+            }
+            return self.auth_state
+
+    async def _login(self, session: str | None) -> None:
         """Send an unchanged OAuth URL to the requesting private session.
 
         Args:
-            session: Administrator's private unified message origin.
+            session: Optional private unified message origin; None for WebUI login.
         """
 
         async def on_url(url: str) -> None:
-            if not await self.context.send_message(
+            self._auth_state["url"] = url
+            if session and not await self.context.send_message(
                 session,
                 MessageChain(
                     [Plain(f"请点击或复制以下链接在浏览器中完成授权：\n{url}")]
@@ -640,34 +817,53 @@ class AgentMailPlugin(Star):
                 )
 
         try:
-            await self.client.login(on_url)
-            self._watch_auth_expired = False
-            await self.context.send_message(
-                session,
-                MessageChain(
-                    [Plain("Agent Mail 已授权成功，可以向 AI 提出邮件收发请求。")]
-                ),
-            )
-            await self._sync_watcher()
+            result = await self.client.login(on_url)
+            account = result.get("data")
+            if not isinstance(account, dict):
+                raise AgentlyError("The CLI returned invalid account information.")
+            await self.mark_authenticated(account)
+            if session:
+                await self.context.send_message(
+                    session,
+                    MessageChain(
+                        [Plain("Agent Mail 已授权成功，可以向 AI 提出邮件收发请求。")]
+                    ),
+                )
+        except asyncio.CancelledError:
+            self._auth_state = {
+                "status": "cancelled",
+                "url": "",
+                "error": "",
+                "account": None,
+            }
+            raise
         except (AgentlyError, OSError) as exc:
+            self._auth_state = {
+                "status": "failed",
+                "url": "",
+                "error": str(exc),
+                "account": None,
+            }
             self.logger.warning(
                 "Agent Mail OAuth did not complete (%s).", type(exc).__name__
             )
             try:
-                await self.context.send_message(
-                    session,
-                    MessageChain(
-                        [
-                            Plain(
-                                f"授权未完成：{exc}\n也可以在 AstrBot 同一环境、同一系统用户下运行 agently-cli auth login。"
-                            )
-                        ]
-                    ),
-                )
+                if session:
+                    await self.context.send_message(
+                        session,
+                        MessageChain(
+                            [
+                                Plain(
+                                    f"授权未完成：{exc}\n也可以在 AstrBot 同一环境、同一系统用户下运行 agently-cli auth login。"
+                                )
+                            ]
+                        ),
+                    )
             except Exception:
                 self.logger.warning(
                     "Could not deliver Agent Mail authorization status."
                 )
+            await self._sync_watcher()
 
     def _authorized_targets(self) -> list[str]:
         """Reauthorize notification owners against current ACLs and profile admins.
@@ -676,6 +872,8 @@ class AgentMailPlugin(Star):
             Sessions whose binding owner currently has read and notify access.
         """
         state = self.service.state
+        if self.auth_state["status"] in {"pending", "logged_out"}:
+            return []
         allowed = []
         for target in state.get("notification_targets", []):
             owner = state.get("notification_owners", {}).get(target, {})
@@ -684,9 +882,23 @@ class AgentMailPlugin(Star):
                 user_id = owner.get("user_id", "")
                 admins = {str(item) for item in config.get("admins_id", []) or []}
                 # Account IDs are compared in full; do not parse colon-containing IDs.
+                dashboard_owner = (
+                    owner.get("platform_id") == "dashboard"
+                    and not user_id
+                    and owner.get("key")
+                    == "user:dashboard:"
+                    + quote(
+                        str(
+                            self.context.get_config()
+                            .get("dashboard", {})
+                            .get("username", "astrbot")
+                        ),
+                        safe="",
+                    )
+                )
                 actor = MailActor(
                     owner.get("key", ""),
-                    bool(user_id and user_id in admins),
+                    dashboard_owner or bool(user_id and user_id in admins),
                     target,
                     owner.get("platform_id", ""),
                     user_id,
@@ -814,6 +1026,8 @@ class AgentMailPlugin(Star):
                 await asyncio.gather(wakeup, return_exceptions=True)
             self._delivery_wakeup.clear()
             await self._sync_watcher()
+            if self.auth_state["status"] in {"pending", "logged_out"}:
+                continue
             for message_id, record in list(self._delivery["pending"].items()):
                 for target in list(record["targets"]):
                     if self._retry_at.get(target, 0) > time.monotonic():

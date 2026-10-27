@@ -1,7 +1,7 @@
 name: astrbot_plugin_agent_mail
 display_name: Agent Mail
-desc: 腾讯 Agent Mail 邮件工具，为 LLM 提供收发、检索、回复和附件能力，支持权限白名单、黑名单、新邮件通知和跨插件 API。
-version: 0.1.0
+desc: 腾讯 Agent Mail 邮件工具与邮箱管理界面，为 LLM 提供收发、检索、回复和附件能力，支持扫码登录、权限白名单、黑名单、新邮件通知和跨插件 API。
+version: 0.2.0
 author: GuJi08233
 repo: https://github.com/GuJi08233/astrbot_plugin_agent_mail
 astrbot_version: ">=4.29,<5"

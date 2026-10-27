@@ -1,0 +1,8 @@
+{
+  "views": {
+    "mail": {
+      "title": "Mail workspace",
+      "description": "Manage Agent Mail login, inbox, outgoing mail, access rules, and notification sessions."
+    }
+  }
+}

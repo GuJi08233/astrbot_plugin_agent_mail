@@ -325,7 +325,12 @@ class MailService:
         return await self.client.run(args)
 
     async def search_messages(
-        self, actor: MailActor, query: str, limit: int = 10, cursor: str = ""
+        self,
+        actor: MailActor,
+        query: str,
+        limit: int = 10,
+        cursor: str = "",
+        folder: str = "",
     ) -> dict:
         """Search a mailbox, retaining the query when requesting later pages.
 
@@ -334,6 +339,7 @@ class MailService:
             query: User-provided search terms.
             limit: Page size between 1 and 50.
             cursor: Opaque cursor from a previous search using the same query.
+            folder: Optional inbox, sent, trash, or spam filter.
 
         Returns:
             Unmodified CLI search envelope.
@@ -357,7 +363,11 @@ class MailService:
             raise ValueError("Message limit must be an integer between 1 and 50.")
         if not isinstance(cursor, str) or len(cursor) > 8192 or "\x00" in cursor:
             raise ValueError("Invalid pagination cursor.")
+        if folder not in ("", "inbox", "sent", "trash", "spam"):
+            raise ValueError("Folder must be inbox, sent, trash, or spam.")
         args = ["message", "+search", "--q", query, "--limit", str(limit)]
+        if folder:
+            args.extend(["--dir", folder])
         if cursor:
             args.extend(["--cursor", cursor])
         return await self.client.run(args)
